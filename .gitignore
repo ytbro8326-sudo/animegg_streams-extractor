@@ -1,0 +1,10 @@
+# Output files
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
