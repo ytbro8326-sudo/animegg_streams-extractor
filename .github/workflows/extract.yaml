@@ -18,7 +18,11 @@ on:
         default: ""
 
   schedule:
-    - cron: "0 0 * * 0"   # every Sunday at midnight UTC (only runs if mode=all by default)
+    - cron: "0 0 * * 0"  # every Sunday at midnight UTC
+
+# Allow the workflow to write back to the repository
+permissions:
+  contents: write
 
 jobs:
   extract:
@@ -27,6 +31,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true  # needed for git push at the end
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -44,34 +50,37 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Restore previous output (if any)
-        uses: actions/cache@v4
-        with:
-          path: output/
-          key: animegg-output-${{ github.run_id }}
-          restore-keys: |
-            animegg-output-
+      # Restore previously committed output from the repo itself.
+      # The git checkout above already has it if it was committed; this step
+      # ensures the output/ directory exists even on a fresh repo.
+      - name: Ensure output directory exists
+        run: mkdir -p output
 
       - name: Run extractor (single)
-        if: ${{ github.event.inputs.mode == 'single' }}
-        run: echo "${{ github.event.inputs.mal_ids }}" | python -c "
-import sys, main
-mal_id = sys.stdin.read().strip()
-main.run_single(int(mal_id))
-"
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'single'
+        run: |
+          python - <<'EOF'
+          import main
+          main.run_single(int("${{ github.event.inputs.mal_ids }}".strip()))
+          EOF
 
       - name: Run extractor (multiple)
-        if: ${{ github.event.inputs.mode == 'multiple' }}
-        run: echo "${{ github.event.inputs.mal_ids }}" | python -c "
-import sys, main
-raw = sys.stdin.read().strip()
-mal_ids = [x.strip() for x in raw.split(',') if x.strip().isdigit()]
-main.run_multiple(mal_ids)
-"
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'multiple'
+        run: |
+          python - <<'EOF'
+          import main
+          raw = "${{ github.event.inputs.mal_ids }}"
+          mal_ids = [x.strip() for x in raw.split(',') if x.strip().isdigit()]
+          main.run_multiple(mal_ids)
+          EOF
 
       - name: Run extractor (all)
-        if: ${{ github.event.inputs.mode == 'all' || github.event_name == 'schedule' }}
-        run: python -c "import main; main.run_all()"
+        if: github.event_name == 'schedule' || github.event.inputs.mode == 'all'
+        run: |
+          python - <<'EOF'
+          import main
+          main.run_all()
+          EOF
 
       - name: Upload output as artifact
         uses: actions/upload-artifact@v4
