@@ -1470,5 +1470,13 @@
     "lang": "sub",
     "embed_url": "https://www.animegg.org/embed/140394",
     "reason": "videoSources empty — no streams found"
+  },
+  {
+    "mal_id": 1735,
+    "title": "Naruto Shippuden",
+    "episode": 273,
+    "lang": "dub",
+    "embed_url": "https://www.animegg.org/embed/67668",
+    "reason": "HTTPSConnectionPool(host='www.animegg.org', port=443): Read timed out. (read timeout=10)"
   }
 ]
