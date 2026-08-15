@@ -1,0 +1,89 @@
+name: AnimeGG Stream Extractor
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Extraction mode"
+        required: true
+        default: "single"
+        type: choice
+        options:
+          - single
+          - multiple
+          - all
+      mal_ids:
+        description: "MAL ID(s) — single value or comma-separated (e.g. 20, 1735, 1535). Ignored if mode is 'all'."
+        required: false
+        default: ""
+
+  schedule:
+    - cron: "0 0 * * 0"   # every Sunday at midnight UTC (only runs if mode=all by default)
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore previous output (if any)
+        uses: actions/cache@v4
+        with:
+          path: output/
+          key: animegg-output-${{ github.run_id }}
+          restore-keys: |
+            animegg-output-
+
+      - name: Run extractor (single)
+        if: ${{ github.event.inputs.mode == 'single' }}
+        run: echo "${{ github.event.inputs.mal_ids }}" | python -c "
+import sys, main
+mal_id = sys.stdin.read().strip()
+main.run_single(int(mal_id))
+"
+
+      - name: Run extractor (multiple)
+        if: ${{ github.event.inputs.mode == 'multiple' }}
+        run: echo "${{ github.event.inputs.mal_ids }}" | python -c "
+import sys, main
+raw = sys.stdin.read().strip()
+mal_ids = [x.strip() for x in raw.split(',') if x.strip().isdigit()]
+main.run_multiple(mal_ids)
+"
+
+      - name: Run extractor (all)
+        if: ${{ github.event.inputs.mode == 'all' || github.event_name == 'schedule' }}
+        run: python -c "import main; main.run_all()"
+
+      - name: Upload output as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: animegg-streams-${{ github.run_id }}
+          path: output/
+          retention-days: 90
+
+      - name: Commit output back to repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f output/
+          git diff --cached --quiet || git commit -m "chore: update extracted streams [run #${{ github.run_number }}]"
+          git push
