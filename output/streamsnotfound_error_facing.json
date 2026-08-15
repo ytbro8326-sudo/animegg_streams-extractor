@@ -1478,5 +1478,13 @@
     "lang": "dub",
     "embed_url": "https://www.animegg.org/embed/67668",
     "reason": "HTTPSConnectionPool(host='www.animegg.org', port=443): Read timed out. (read timeout=10)"
+  },
+  {
+    "mal_id": 45,
+    "title": "Rurouni Kenshin",
+    "episode": 64,
+    "lang": "dub",
+    "embed_url": "https://www.animegg.org/embed/32312",
+    "reason": "HTTPSConnectionPool(host='www.animegg.org', port=443): Read timed out. (read timeout=10)"
   }
 ]
