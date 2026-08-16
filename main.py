@@ -22,6 +22,10 @@ OUTPUT_DIR     = "output"
 OUTPUT_BASE    = os.path.join(OUTPUT_DIR, "animegg_streams")
 ERROR_LOG_FILE = os.path.join(OUTPUT_DIR, "streamsnotfound_error_facing.json")
 
+# ── How many MAL IDs to process before flushing to disk.
+#    Set to 2 so at most 2 entries are lost if the job is killed mid-run.
+SAVE_BATCH_SIZE = 2
+
 _dataset_cache = None
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -37,8 +41,7 @@ def load_error_log():
 
 
 def save_error_log(entries):
-    with open(ERROR_LOG_FILE, "w", encoding="utf-8") as f:
-        json.dump(entries, f, ensure_ascii=False, indent=2)
+    _atomic_write_json(ERROR_LOG_FILE, entries)
 
 
 def log_error(mal_id, title, ep_num, lang, embed_url, reason):
@@ -149,10 +152,18 @@ def build_record(serial, anime_entry):
     return record
 
 
-# ── File I/O with auto-split ───────────────────────────────────────────────────
+# ── File I/O with auto-split and atomic writes ─────────────────────────────────
 
 def get_filename(part):
     return f"{OUTPUT_BASE}.json" if part == 1 else f"{OUTPUT_BASE}_{part}.json"
+
+
+def _atomic_write_json(path, data):
+    """Write JSON to a .tmp file then rename so a crash never corrupts the real file."""
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)   # atomic on POSIX; best-effort on Windows
 
 
 def load_existing():
@@ -169,19 +180,22 @@ def load_existing():
 
 
 def save_records(all_records):
+    """
+    Split all_records into ≤30 MB chunks and write each chunk atomically.
+    Any leftover part-files from a previous longer run are removed.
+    """
     part, chunk, chunk_size = 1, [], 0
     for record in all_records:
         line_size = len(json.dumps(record, ensure_ascii=False).encode("utf-8"))
         if chunk and chunk_size + line_size > MAX_FILE_SIZE:
-            with open(get_filename(part), "w", encoding="utf-8") as f:
-                json.dump(chunk, f, ensure_ascii=False, indent=2)
+            _atomic_write_json(get_filename(part), chunk)
             part += 1
             chunk, chunk_size = [], 0
         chunk.append(record)
         chunk_size += line_size
     if chunk:
-        with open(get_filename(part), "w", encoding="utf-8") as f:
-            json.dump(chunk, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(get_filename(part), chunk)
+    # Remove stale part-files from a previously larger run
     while os.path.exists(get_filename(part + 1)):
         os.remove(get_filename(part + 1))
         part += 1
@@ -211,7 +225,8 @@ def run_single(mal_id):
         return
     existing = load_existing()
     done_ids = {r["mal_id"]: i for i, r in enumerate(existing)}
-    serial   = done_ids.get(int(mal_id), len(existing)) + 1
+    # Preserve the original serial for replacements; assign next serial for new entries
+    serial = existing[done_ids[int(mal_id)]]["serial"] if int(mal_id) in done_ids else len(existing) + 1
     print(f"[*] Extracting: {anime.get('title')} (MAL {mal_id})")
     record = build_record(serial, anime)
     if int(mal_id) in done_ids:
@@ -227,22 +242,43 @@ def run_multiple(mal_ids):
     existing    = load_existing()
     done_ids    = {r["mal_id"]: i for i, r in enumerate(existing)}
     all_records = list(existing)
-    serial      = len(all_records) + 1
+    # next serial number = 1 past the highest serial already assigned
+    serial      = max((r["serial"] for r in all_records), default=0) + 1
+
+    unsaved_count = 0   # how many MAL IDs have been processed since the last flush
+
     for mal_id in mal_ids:
         mal_id = int(mal_id)
         anime  = find_anime(mal_id)
         if not anime:
             print(f"[!] MAL ID {mal_id} not found, skipping.")
             continue
-        print(f"[{serial}] {anime.get('title')} (MAL {mal_id})")
-        record = build_record(serial, anime)
+
+        # Preserve original serial for replacements
+        rec_serial = all_records[done_ids[mal_id]]["serial"] if mal_id in done_ids else serial
+        print(f"[{rec_serial}] {anime.get('title')} (MAL {mal_id})")
+        record = build_record(rec_serial, anime)
+
         if mal_id in done_ids:
             all_records[done_ids[mal_id]] = record
         else:
             all_records.append(record)
             done_ids[mal_id] = len(all_records) - 1
             serial += 1
+
+        unsaved_count += 1
+
+        # ── Checkpoint: flush every SAVE_BATCH_SIZE MAL IDs ──────────────────
+        if unsaved_count >= SAVE_BATCH_SIZE:
+            print(f"  [checkpoint] saving after {unsaved_count} entries …")
+            save_records(all_records)
+            unsaved_count = 0
+
+    # Final flush for any remainder that didn't fill a full batch
+    if unsaved_count > 0:
+        print(f"  [checkpoint] final save ({unsaved_count} remaining entries) …")
         save_records(all_records)
+
     print(f"\n[✓] Done.")
     show_saved_files()
 
@@ -251,10 +287,14 @@ def run_all():
     existing    = load_existing()
     done_ids    = {r["mal_id"] for r in existing}
     all_records = list(existing)
-    serial      = len(all_records) + 1
+    serial      = max((r["serial"] for r in all_records), default=0) + 1
     datasets    = load_all_datasets()
     pending     = [a for a in datasets if a.get("mal_id") not in done_ids]
-    print(f"[*] Remaining to process: {len(pending)} / {len(datasets)}\n")
+    print(f"[*] Remaining to process: {len(pending)} / {len(datasets)}")
+    print(f"[*] Checkpoint interval : every {SAVE_BATCH_SIZE} MAL IDs\n")
+
+    unsaved_count = 0   # how many MAL IDs processed since the last flush
+
     for anime in pending:
         mal_id = anime.get("mal_id")
         print(f"[{serial}] {anime.get('title')} (MAL {mal_id})")
@@ -262,7 +302,20 @@ def run_all():
         all_records.append(record)
         done_ids.add(mal_id)
         serial += 1
+
+        unsaved_count += 1
+
+        # ── Checkpoint: flush every SAVE_BATCH_SIZE MAL IDs ──────────────────
+        if unsaved_count >= SAVE_BATCH_SIZE:
+            print(f"  [checkpoint] saving after {unsaved_count} entries …")
+            save_records(all_records)
+            unsaved_count = 0
+
+    # Final flush for any remainder
+    if unsaved_count > 0:
+        print(f"  [checkpoint] final save ({unsaved_count} remaining entries) …")
         save_records(all_records)
+
     print(f"\n[✓] Done. Total: {len(all_records)} records")
     show_saved_files()
 
